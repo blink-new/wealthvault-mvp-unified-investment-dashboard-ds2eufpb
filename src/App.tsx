@@ -10,6 +10,11 @@ import { Label } from './components/ui/label'
 import { Textarea } from './components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
+import { FileUpload } from './components/FileUpload'
+import { EditInvestmentModal } from './components/EditInvestmentModal'
+import { GuardianView } from './components/GuardianView'
+import { InvestmentTypeManager, type InvestmentType } from './components/InvestmentTypeManager'
+import { extractDataFromDocument, type ExtractedData } from './services/ocrService'
 import { 
   Plus, 
   Upload, 
@@ -26,7 +31,10 @@ import {
   Shield,
   Heart,
   TrendingUp,
-  User
+  User,
+  Copy,
+  ExternalLink,
+  Settings
 } from 'lucide-react'
 
 interface Investment {
@@ -113,7 +121,19 @@ function App() {
   const [filter, setFilter] = useState<'all' | 'active' | 'attention' | 'expired'>('all')
   const [uploadModalOpen, setUploadModalOpen] = useState(false)
   const [guardianModalOpen, setGuardianModalOpen] = useState(false)
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [selectedInvestment, setSelectedInvestment] = useState<Investment | null>(null)
   const [selectedType, setSelectedType] = useState<string>('')
+  const [isProcessingUpload, setIsProcessingUpload] = useState(false)
+  const [extractedData, setExtractedData] = useState<ExtractedData | null>(null)
+  const [showGuardianView, setShowGuardianView] = useState(false)
+  const [guardianShareLink, setGuardianShareLink] = useState<string>('')
+  const [availableTypes, setAvailableTypes] = useState<InvestmentType[]>([])
+  const [uploadFormData, setUploadFormData] = useState({
+    password: '',
+    nominee: '',
+    maturity: ''
+  })
 
   // Authentication and data loading
   useEffect(() => {
@@ -188,6 +208,112 @@ function App() {
     }
   }, [user?.id, loadInvestments])
 
+  // Handle file upload with OCR
+  const handleFileUpload = async (file: File) => {
+    setIsProcessingUpload(true)
+    try {
+      const data = await extractDataFromDocument(file)
+      setExtractedData(data)
+      
+      // Pre-fill form with extracted data
+      setUploadFormData(prev => ({
+        ...prev,
+        nominee: data.nominee || prev.nominee,
+        maturity: data.maturity || prev.maturity
+      }))
+    } catch (error) {
+      console.error('OCR extraction failed:', error)
+      // Continue with manual entry
+    } finally {
+      setIsProcessingUpload(false)
+    }
+  }
+
+  // Save new investment
+  const handleSaveInvestment = async () => {
+    if (!user?.id || !selectedType || !extractedData) return
+
+    try {
+      const newInvestment = {
+        id: `inv_${Date.now()}`,
+        userId: user.id,
+        type: selectedType,
+        name: extractedData.policyName || extractedData.companyName || 'New Investment',
+        policyNumber: extractedData.policyNumber || '',
+        premium: extractedData.premium || 0,
+        frequency: extractedData.frequency || 'Yearly',
+        nextDue: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 1 year from now
+        maturity: uploadFormData.maturity || extractedData.maturity || '',
+        nominee: uploadFormData.nominee || extractedData.nominee || '',
+        status: 'active' as const,
+        coverage: extractedData.coverage || 0,
+        documents: JSON.stringify([]),
+        passwordProtected: uploadFormData.password ? "1" : "0"
+      }
+
+      await blink.db.investments.create(newInvestment)
+      await loadInvestments()
+      
+      // Reset form
+      setUploadModalOpen(false)
+      setExtractedData(null)
+      setSelectedType('')
+      setUploadFormData({ password: '', nominee: '', maturity: '' })
+    } catch (error) {
+      console.error('Failed to save investment:', error)
+    }
+  }
+
+  // Edit investment
+  const handleEditInvestment = (investment: Investment) => {
+    setSelectedInvestment(investment)
+    setEditModalOpen(true)
+  }
+
+  // Save edited investment
+  const handleSaveEditedInvestment = async (investment: Investment) => {
+    try {
+      await blink.db.investments.update(investment.id, {
+        type: investment.type,
+        name: investment.name,
+        policyNumber: investment.policyNumber,
+        premium: investment.premium,
+        frequency: investment.frequency,
+        nextDue: investment.nextDue,
+        maturity: investment.maturity,
+        nominee: investment.nominee,
+        status: investment.status,
+        coverage: investment.coverage,
+        passwordProtected: investment.passwordProtected ? "1" : "0"
+      })
+      
+      await loadInvestments()
+      setEditModalOpen(false)
+      setSelectedInvestment(null)
+    } catch (error) {
+      console.error('Failed to update investment:', error)
+    }
+  }
+
+  // Generate Guardian View link
+  const handleGenerateGuardianLink = () => {
+    // In a real implementation, you'd generate a secure token and store sharing preferences
+    const token = btoa(`${user.id}_${Date.now()}_guardian`)
+    const baseUrl = window.location.origin
+    const shareUrl = `${baseUrl}?guardian=true&token=${token}`
+    setGuardianShareLink(shareUrl)
+  }
+
+  // Copy Guardian link to clipboard
+  const handleCopyGuardianLink = async () => {
+    try {
+      await navigator.clipboard.writeText(guardianShareLink)
+      // You could show a toast notification here
+    } catch (error) {
+      console.error('Failed to copy link:', error)
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -257,6 +383,14 @@ function App() {
 
   const attentionCount = investments.filter(inv => inv.status === 'attention').length
 
+  // Check if we're in Guardian View mode
+  const urlParams = new URLSearchParams(window.location.search)
+  const isGuardianMode = urlParams.get('guardian') === 'true'
+  
+  if (isGuardianMode) {
+    return <GuardianView />
+  }
+
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Header */}
@@ -271,6 +405,11 @@ function App() {
           </div>
           
           <div className="flex items-center space-x-3">
+            <InvestmentTypeManager 
+              selectedTypes={availableTypes}
+              onTypesChange={setAvailableTypes}
+            />
+            
             <Dialog open={uploadModalOpen} onOpenChange={setUploadModalOpen}>
               <DialogTrigger asChild>
                 <Button className="bg-blue-600 hover:bg-blue-700">
@@ -290,40 +429,86 @@ function App() {
                         <SelectValue placeholder="Select type" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="LIC">LIC</SelectItem>
-                        <SelectItem value="Mediclaim">Mediclaim</SelectItem>
-                        <SelectItem value="Term">Term Insurance</SelectItem>
-                        <SelectItem value="NPS">NPS</SelectItem>
+                        {availableTypes.filter(type => type.isActive).map(type => (
+                          <SelectItem key={type.id} value={type.name}>
+                            {type.name}
+                          </SelectItem>
+                        ))}
+                        {availableTypes.length === 0 && (
+                          <>
+                            <SelectItem value="LIC">LIC</SelectItem>
+                            <SelectItem value="Mediclaim">Mediclaim</SelectItem>
+                            <SelectItem value="Term">Term Insurance</SelectItem>
+                            <SelectItem value="NPS">NPS</SelectItem>
+                          </>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
                   
-                  <div className="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center">
-                    <Upload className="h-8 w-8 text-slate-400 mx-auto mb-2" />
-                    <p className="text-sm text-slate-600">Drag & drop your document here</p>
-                    <p className="text-xs text-slate-500 mt-1">PDF, JPG, PNG supported</p>
-                    <Button variant="outline" className="mt-3">
-                      Browse Files
-                    </Button>
-                  </div>
+                  <FileUpload 
+                    onFileSelect={handleFileUpload}
+                    acceptedTypes={['.pdf', '.jpg', '.jpeg', '.png']}
+                    maxSize={10}
+                  />
+
+                  {extractedData && (
+                    <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                      <h4 className="font-medium text-green-800 mb-2">✅ Data Extracted Successfully!</h4>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        {extractedData.policyNumber && (
+                          <div><span className="font-medium">Policy:</span> {extractedData.policyNumber}</div>
+                        )}
+                        {extractedData.premium && (
+                          <div><span className="font-medium">Premium:</span> ₹{extractedData.premium.toLocaleString()}</div>
+                        )}
+                        {extractedData.coverage && (
+                          <div><span className="font-medium">Coverage:</span> ₹{extractedData.coverage.toLocaleString()}</div>
+                        )}
+                        {extractedData.nominee && (
+                          <div><span className="font-medium">Nominee:</span> {extractedData.nominee}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   
                   <div>
                     <Label htmlFor="password">Document Password (Optional)</Label>
-                    <Input id="password" type="password" placeholder="Enter if document is locked" />
+                    <Input 
+                      id="password" 
+                      type="password" 
+                      placeholder="Enter if document is locked"
+                      value={uploadFormData.password}
+                      onChange={(e) => setUploadFormData(prev => ({ ...prev, password: e.target.value }))}
+                    />
                   </div>
                   
                   <div>
                     <Label htmlFor="nominee">Nominee (Optional)</Label>
-                    <Input id="nominee" placeholder="Enter nominee name" />
+                    <Input 
+                      id="nominee" 
+                      placeholder="Enter nominee name"
+                      value={uploadFormData.nominee}
+                      onChange={(e) => setUploadFormData(prev => ({ ...prev, nominee: e.target.value }))}
+                    />
                   </div>
                   
                   <div>
                     <Label htmlFor="maturity">Maturity Date (Optional)</Label>
-                    <Input id="maturity" type="date" />
+                    <Input 
+                      id="maturity" 
+                      type="date"
+                      value={uploadFormData.maturity}
+                      onChange={(e) => setUploadFormData(prev => ({ ...prev, maturity: e.target.value }))}
+                    />
                   </div>
                   
-                  <Button className="w-full bg-blue-600 hover:bg-blue-700">
-                    Upload & Extract Data
+                  <Button 
+                    className="w-full bg-blue-600 hover:bg-blue-700"
+                    onClick={handleSaveInvestment}
+                    disabled={!selectedType || (!extractedData && !uploadFormData.nominee)}
+                  >
+                    {isProcessingUpload ? 'Processing...' : 'Save Investment'}
                   </Button>
                 </div>
               </DialogContent>
@@ -366,10 +551,53 @@ function App() {
                       </label>
                     </div>
                   </div>
-                  
-                  <Button className="w-full bg-blue-600 hover:bg-blue-700">
-                    Generate Guardian Link
-                  </Button>
+
+                  {guardianShareLink ? (
+                    <div className="space-y-3">
+                      <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <p className="text-sm font-medium text-green-800 mb-2">✅ Guardian Link Generated!</p>
+                        <div className="flex items-center space-x-2">
+                          <Input 
+                            value={guardianShareLink} 
+                            readOnly 
+                            className="text-xs"
+                          />
+                          <Button 
+                            size="sm" 
+                            onClick={handleCopyGuardianLink}
+                            variant="outline"
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                      
+                      <div className="flex space-x-2">
+                        <Button 
+                          variant="outline" 
+                          onClick={() => window.open(guardianShareLink, '_blank')}
+                          className="flex-1"
+                        >
+                          <ExternalLink className="h-4 w-4 mr-2" />
+                          Preview
+                        </Button>
+                        <Button 
+                          onClick={() => setGuardianShareLink('')}
+                          variant="outline"
+                          className="flex-1"
+                        >
+                          Generate New
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button 
+                      className="w-full bg-blue-600 hover:bg-blue-700"
+                      onClick={handleGenerateGuardianLink}
+                    >
+                      Generate Guardian Link
+                    </Button>
+                  )}
                 </div>
               </DialogContent>
             </Dialog>
@@ -488,10 +716,15 @@ function App() {
                         <TableCell>{getStatusBadge(investment.status)}</TableCell>
                         <TableCell>
                           <div className="flex space-x-2">
-                            <Button variant="ghost" size="sm">
+                            <Button variant="ghost" size="sm" title="View Details">
                               <Eye className="h-4 w-4" />
                             </Button>
-                            <Button variant="ghost" size="sm">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => handleEditInvestment(investment)}
+                              title="Edit Investment"
+                            >
                               <Edit className="h-4 w-4" />
                             </Button>
                           </div>
@@ -543,6 +776,17 @@ function App() {
           </TabsContent>
         </Tabs>
       </main>
+
+      {/* Edit Investment Modal */}
+      <EditInvestmentModal
+        investment={selectedInvestment}
+        isOpen={editModalOpen}
+        onClose={() => {
+          setEditModalOpen(false)
+          setSelectedInvestment(null)
+        }}
+        onSave={handleSaveEditedInvestment}
+      />
     </div>
   )
 }
